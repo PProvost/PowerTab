@@ -87,6 +87,9 @@ Function Invoke-TabItemSelector {
 
     begin {
         Write-Trace "Invoking Tab Item Selector."
+        $SelectionReason = "it is the user's choice"
+
+        if (-not $PSBoundParameters.ContainsKey("ReturnWord")) {$ReturnWord = $LastWord}
 
         [String[]]$Values = @()
         [Object[]]$Objects = @()
@@ -117,6 +120,7 @@ Function Invoke-TabItemSelector {
 
         ## If dynamic, select an appropriate handler based on the current host
         if ($SelectionHandler -eq "Dynamic") {
+            $SelectionReason = "it is the perferred handler for the current host"
             switch -exact ($Host.Name) {
                 'ConsoleHost' {  ## PowerShell.exe
                     $SelectionHandler = "ConsoleList"
@@ -170,7 +174,10 @@ Function Invoke-TabItemSelector {
                 break
             }
         }
-        if ($IncompatibleHandlers -contains $SelectionHandler) {$SelectionHandler = "Default"}
+        if ($IncompatibleHandlers -contains $SelectionHandler) {
+            $SelectionReason = "the chosen handler is not compatible with the current host"
+            $SelectionHandler = "Default"
+        }
 
         ## List of selection handlers that can handle objects
         $ObjectHandlers = @("ConsoleList","CommonPrefix","ObjectDefault")
@@ -181,7 +188,7 @@ Function Invoke-TabItemSelector {
             $Values = foreach ($Item in $Objects) {$Item.Value}
         }
 
-        Write-Trace "Decided to invoke $SelectionHandler."
+        Write-Trace "Decided to invoke $SelectionHandler, because $SelectionReason."
 
         switch -exact ($SelectionHandler) {
             'ConsoleList' {$Objects | Out-ConsoleList $LastWord $ReturnWord -ForceList:$ForceList}
@@ -994,8 +1001,9 @@ Function Initialize-PowerTab {
     if ($ConfigurationPath -and ((Test-Path $ConfigurationPath) -or ($ConfigurationPath -eq "IsolatedStorage"))) {
         $Config = InternalImportTabExpansionConfig $ConfigurationPath
     } else {
-        ## TODO: Throw error or create new config?
-        #$Config = InternalNewTabExpansionConfig $ConfigurationPath
+        ## Configuration path does not exist
+        Write-Warning "Specified configuration path does not exist."  ## TODO: Localize
+        $Config = InternalNewTabExpansionConfig $ConfigurationPath
     }
 
     ## Load Version
@@ -1020,7 +1028,8 @@ Function Initialize-PowerTab {
         ## Upgrade config and database
         UpgradeTabExpansionDatabase ([Ref]$Config) ([Ref]$Database) $Version
     } elseif ($Version -gt $CurVersion) {
-        ## TODO: config is from a later version
+        ## Config is from a newer version
+        throw "The configuration was created with a newer version of PowerTab and is not compatible."
     }
 
     ## Config and database are good
@@ -1050,17 +1059,27 @@ Function UpgradeTabExpansionDatabase {
     in the database or config structure.  Or to add default values for new config settings.
     #>
 
+    $UpgradeOccurred = $false
+
     if ($Version -lt [System.Version]'0.99.3.0') {
         ## Upgrade versions from the first version of PowerTab
         Write-Host "Upgrading from version $Version"  ## TODO:  Localize
         UpgradePowerTab99 $Config $Database
         $Version = '0.99.3.0'
+        $UpgradeOccurred = $true
     }
     if ($Version -lt [System.Version]'0.99.5.0') {
         ## Upgrade versions from the first version of PowerTab
         Write-Host "Upgrading from version $Version"  ## TODO:  Localize
         UpgradePowerTab993 $Config $Database
         $Version = '0.99.5.0'
+        $UpgradeOccurred = $true
+    }
+
+    ## Export the newly upgraded config and database
+    if ($UpgradeOccurred) {
+        Export-TabExpansionConfig
+        Export-TabExpansionDatabase
     }
 }
 
@@ -1362,7 +1381,7 @@ Function CreatePowerTabConfig {
             [Int]`$val = [Bool]`$args[0]
             `$dsTabExpansionConfig.Tables['Config'].Select(`"Name = 'Enabled'`")[0].Value = `$val
             if ([Bool]`$val) {
-                . `"`$PSScriptRoot\TabExpansion.ps1`"
+                . `"$PSScriptRoot\TabExpansion.ps1`"
             } else {
                 Set-Content Function:\TabExpansion -Value `$OldTabExpansion
             }") `

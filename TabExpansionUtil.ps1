@@ -106,13 +106,13 @@ Function Resolve-Command {
             $Module = $Name.Substring(0, $Name.Indexof("\"))
             $CommandName = $Name.Substring($Name.Indexof("\") + 1, $Name.length - ($Name.Indexof("\") + 1))
             if ($Module = Get-Module $Module) {
-                $Command = @(Get-Command $CommandName -Module $Module -ErrorAction SilentlyContinue)[0]
+                $Command = @(GetCommand $CommandName -Module $Module)[0]
                 if (-not $Command) {
                     ## Try to look up command with prefix
                     $Prefix = Get-CommandPrefix $Module
                     $Verb = $CommandName.Substring(0, $CommandName.Indexof("-"))
                     $Noun = $CommandName.Substring($CommandName.Indexof("-") + 1, $CommandName.length - ($CommandName.Indexof("-") + 1))
-                    $Command = @(Get-Command "$Verb-$Prefix$Noun" -ErrorAction SilentlyContinue)[0]
+                    $Command = @(GetCommand "$Verb-$Prefix$Noun")[0]
                 }
                 if (-not $Command) {
                     ## Try looking in the module's exported command list
@@ -125,12 +125,12 @@ Function Resolve-Command {
                 ## This try is to provide a second chance to catch automatic aliases for Get-* commands
                 if ($Name.Contains("?")) {
                     ## The where clause prevents problems with "?" wildcard
-                    $Command = @(Get-Command $Name | Where-Object {$_.Name -eq $Name})[0]
+                    $Command = @(GetCommand $Name | Where-Object {$_.Name -eq $Name})[0]
                 } else {
-                    $Command = @(Get-Command $Name)[0]
+                    $Command = @(GetCommand $Name)[0]
                 }
             } catch {
-                if (-not ($Command = try {@(Get-Command "Get-$Name")[0]} catch {})) {
+                if (-not ($Command = try {@(GetCommand "Get-$Name")[0]} catch {})) {
                     throw $_
                 }
             }
@@ -322,9 +322,9 @@ Function Get-CommandPrefix {
     process {
         ## Get module info
 		if ($PSCmdlet.ParameterSetName -eq "Command") {
-            $ModuleInfo =  (Resolve-Command $Command -CommandInfo).Module
+            $ModuleInfo = (Resolve-Command $Command -CommandInfo).Module
         } elseif (($PSCmdlet.ParameterSetName -eq "CommandInfo") -and $CommandInfo.Module) {
-            $ModuleInfo =  Get-Module $CommandInfo.Module
+            $ModuleInfo = Get-Module $CommandInfo.Module
         }
 
         if ($ModuleInfo) {
@@ -357,6 +357,30 @@ Function Get-CommandPrefix {
     }
 }
 
+Function GetCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        [String]$Name
+        ,
+        [String]$Module
+        ,
+        [System.Management.Automation.CommandTypes]$CommandType = "All"
+    )
+
+    end {
+        ## The closures prevent internal PowerTab methods from being shown.
+        if ($PSVersionTable.PSVersion -eq "2.0") {
+            & {Get-Command $Name -Module $Module -CommandType $CommandType -ErrorAction SilentlyContinue}.GetNewClosure()
+        } else {
+            if ($Module) {
+                $Name = "$Module\$Name"
+            }
+            & {$ExecutionContext.InvokeCommand.GetCommands($Name, $CommandType, $true) | Sort-Object Name}.GetNewClosure()
+        }
+    }
+}
+
 ############
 
 Function Resolve-TabExpansionParameterValue {
@@ -374,6 +398,123 @@ Function Resolve-TabExpansionParameterValue {
             break
         }
         Default {$Value}
+    }
+}
+
+############
+
+
+Function Invoke-ProviderPathHandler {
+    [CmdletBinding()]
+    param(
+		[Parameter(Position = 0)]
+        [String]
+        $Path
+    )
+
+    end {
+        Write-Trace "Executing FileSystem completion."
+
+        $PowerTabFileSystemMode = $true
+        $Path = $Path -replace '`'
+
+        ## 
+        $PathSlices = [Regex]::Split($Path, '\\|/')
+        if ($PathSlices.Count -eq 1) {
+            if ($PathSlices[0] -like "*:") {
+                ## Add a trailing backslash if only a drive name
+                $Path = $PathSlices[0] + "\"
+                $PathSlices = $PathSlices,""
+            } else {
+                ## Convert single words to a more exact path
+                $PathSlices = ,"." + $PathSlices
+            }
+        }
+        if ($PathSlices[0] -eq "~") {
+            ## Resolve reference to HOME folder for use outside PS
+            $PathSlices[0] = try {Resolve-Path "~"} catch {$PathSlices[0]}
+        }
+        $Container = [String]::Join('\', $PathSlices[0..($PathSlices.Count - 2)])
+        $LastPath = $Container + "\$([Regex]::Split($Path,'\\|/|:')[-1])"
+
+        ## TODO: replace with calls to new function
+        if (("Push-Location","Set-Location") -contains $Context.Command) {
+            $ChildItems = @(Get-ChildItem "$Path*" | Where-Object {$_.PSIsContainer})
+        } else {
+            $ChildItems = @(Get-ChildItem "$Path*")
+        }
+
+        ## If no matches, return
+        if (-not $ChildItems) {$Path; return}
+
+        ## Add entry for parent ("..")
+        #if ((@($childitems).count -eq 1) -and ($Path.endswith('\')) ) {$childitems = $childitems,@{name='..'}}
+
+        ## Fixes paths for registry keys, certificates and other unusual paths
+        ## Improved fix for a problem identified by idvorkin (http://poshcode.org/1586)
+        $ChildItems = foreach ($Item in $ChildItems) {
+            $Child = switch ($Item.GetType().FullName) {
+                "System.Security.Cryptography.X509Certificates.X509Certificate2" {$Item.Thumbprint;break}
+                "Microsoft.Powershell.Commands.X509StoreLocation" {$Item.Location;break}
+                "Microsoft.Win32.RegistryKey" {$Item.Name.Split("\")[-1];break}
+                default {$Item.Name}
+            }
+            $Type = switch ($Item.GetType().FullName) {
+                "System.IO.DirectoryInfo" {"Directory";break}
+                "System.IO.FileInfo" {"File";break}
+                "System.Management.Automation.AliasInfo" {"Alias";break}
+                "System.Management.Automation.FilterInfo" {"Command";break}
+                "System.Management.Automation.FunctionInfo" {"Command";break}
+                "System.Security.Cryptography.X509Certificates.X509Certificate2" {"Certificate";break}
+                "Microsoft.Powershell.Commands.X509StoreLocation" {"CertificateStore";break}
+                "Microsoft.Win32.RegistryKey" {"RegistryKey";break}
+                default {$_}
+            }
+            New-TabItem "$Container\$Child" "$Container\$Child" -Type $Type
+        }
+        $ChildItems | Invoke-TabItemSelector $LastPath -SelectionHandler $SelectionHandler -Return $Path -ForceList:$ForceList | ForEach-Object {
+            ## If a path contains any of these characters it needs to be in quotes
+            $_charsRequiringQuotes = ('`&@''#{}()$,; ' + "`t").ToCharArray()
+        } {
+            $Quote = ''
+            $Invoke = ''
+
+            if (($LastBlock -notmatch ".*['`"]`$") -and (-not $NestedPowerTab)) {  ## Don't quote if it looks like the path is already quoted
+                if ($_ -is [String]) {
+                    ## Remove quotes from beginning and end of string
+                    $_ = $_ -replace '^"|"$'
+                    ## Escape certain characters
+                    $_ = $_ -replace '([\$"`])','`$1'
+
+                    if ($_.IndexOfAny($_charsRequiringQuotes) -ge 0) {
+                        ## Check for quotes in the last block of the input line,
+                        ## if they exist, PowerShell will add them to this output
+                        ## if not, then quotes can safely be added
+                        if (-not (@([Char[]]$LastBlock | Where-Object {$_ -match '"|'''}).Count % 2)) {$Quote = '"'}
+                        if (($LastBlock.Trim() -eq $Path)) {$Invoke = '& '}
+                    }
+                    "$Invoke$Quote$_$Quote"
+                } else {
+                    ## Remove quotes from beginning and end of string
+                    $_.Value = $_.Value -replace '^"|"$'
+                    ## Escape certain characters
+                    $_.Value = $_.Value -replace '([\$"`])','`$1'
+
+                    if ($_.Value.IndexOfAny($_charsRequiringQuotes) -ge 0) {
+                        ## Check for quotes in the last block of the input line,
+                        ## if they exist, PowerShell will add them to this output
+                        ## if not, then quotes can safely be added
+                        if (-not (@([Char[]]$LastBlock | Where-Object {$_ -match '"|'''}).Count % 2)) {$Quote = '"'}
+                        if (($LastBlock.Trim() -eq $Path)) {$Invoke = '& '}
+                    }
+                    $_.Value = "$Invoke$Quote$($_.Value)$Quote"
+                    $_
+                }
+            } else {
+                ## Need to return the value if we are not quoting
+                $_
+            }
+        }
     }
 }
 

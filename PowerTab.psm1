@@ -18,14 +18,13 @@ if (Test-Path Function:TabExpansion) {
     $OldTabExpansion = Get-Content Function:TabExpansion
 } else {
     ## This is a temporary compatibility change for PowerShell v3.
-    ## TODO: Eventually TabExpansion() should get removed if it will have no contents
-    $OldTabExpansion = ""
+    $OldTabExpansion = $null
 }
 $Module = $MyInvocation.MyCommand.ScriptBlock.Module 
 $Module.OnRemove = {
     if ((Get-Command TabExpansion).Module.Name -eq "PowerTab") {
         ## Only reset TabExpansion() if PowerTab's override is currently in use
-        Set-Content Function:\TabExpansion -Value $OldTabExpansion
+        $Function:TabExpansion = $OldTabExpansion
     }
 }
 
@@ -47,6 +46,8 @@ $TabExpansionCommandInfoRegistry = @{}
 $TabExpansionParameterNameRegistry = @{}
 
 $ConfigFileName = "PowerTabConfig.xml"
+
+$PSv3HasRun = if ($PSVersionTable.PSVersion -eq "3.0") {$false} else {$true}
 
 
 #########################
@@ -149,7 +150,7 @@ if ($ConfigurationPathParam) {
         $LocationChoices = [System.Management.Automation.Host.ChoiceDescription[]]($ProfileDir,$InstallDir,$AppDataDir,$IsoStorageDir,$OtherDir)
         $Answer = $Host.UI.PromptForChoice($Resources.setup_wizard_config_location_caption, $Resources.setup_wizard_config_location_message, $LocationChoices, 0)
         $SetupConfigurationPath = switch ($Answer) {
-            0 {Split-Path $Profile}
+            0 {$ExecutionContext.SessionState.Path.ParseParent($Profile, $null)}
             1 {$PSScriptRoot}
             2 {Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ApplicationData)) "PowerTab"}
             3 {"IsolatedStorage"}
